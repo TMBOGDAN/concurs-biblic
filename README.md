@@ -11,13 +11,13 @@ flowchart LR
     B[React / Vite browser] -->|REST /api/v1| N[Nginx]
     B <-->|Authenticated WebSocket /ws| N
     N --> A[FastAPI · one worker]
-    A --> P[(PostgreSQL)]
+    A --> P[(SQLite / PostgreSQL)]
 ```
 
 - **Frontend:** React 19, TypeScript, Vite, React Router, Tailwind CSS 4, TanStack Query, React Hook Form, Zod, Lucide icons.
-- **Backend:** Python 3.12+, FastAPI, Pydantic, SQLAlchemy 2, psycopg, Alembic, Argon2id.
+- **Backend:** Python 3.12+, FastAPI, Pydantic, SQLAlchemy 2, SQLite for local startup or PostgreSQL, Alembic, Argon2id.
 - **Infrastructure:** Docker Compose, PostgreSQL 18 with a named persistent volume, a Python backend container, and a multi-stage frontend build served through Nginx. Only Nginx exposes a host port.
-- **Tests:** pytest against actual PostgreSQL, Vitest/Testing Library, and a Playwright browser acceptance test.
+- **Tests:** pytest against file-backed SQLite or actual PostgreSQL, Vitest/Testing Library, and a Playwright browser acceptance test.
 
 The database owns all competition state. WebSockets send edition-scoped event notifications; clients immediately fetch an authorized REST snapshot. This avoids leaking answer keys or another participant's session in broadcast messages. There is no polling loop and no automatic question timer. Heartbeats detect broken sockets, with exponential reconnect and snapshot reload.
 
@@ -47,13 +47,19 @@ The backend runs migrations before startup. Service health checks ensure Postgre
 
 ## Local Windows development without Docker
 
-Prerequisites: Python 3.12+, Node.js 22.12+ or 24, npm, and PostgreSQL 16/17/18 installed in the standard `C:\Program Files\PostgreSQL\<version>\bin` directory.
+Prerequisites: Python 3.12+, Node.js 22.12+ or 24, and npm. SQLite is included with Python; no database server installation is needed.
 
 ```powershell
 .\scripts\start-local.ps1
 ```
 
-This creates a separate password-protected PostgreSQL cluster inside ignored `.local/dev-postgres` on port **55433**, installs dependencies, applies migrations, creates the initial admin, and starts FastAPI and Vite as hidden background processes. It does not modify an existing PostgreSQL service. Ports 8000 and 5173 must be available.
+This installs dependencies, checks the database, creates the SQLite file **`.local/quiz.sqlite3`** and its tables if missing, creates the initial admin, and starts FastAPI and Vite as hidden background processes. Existing data and admin credentials are retained on subsequent starts. Ports 8000 and 5173 must be available.
+
+The API also initializes the database automatically when started directly with `uvicorn app.main:app`. An initial `ADMIN_PASSWORD` of at least 12 characters is required; `scripts/setup.ps1` generates it in `.env`. A malformed or incompatible database causes a clear startup error and is never silently replaced. SQLite schema versions are checked; future schema changes need explicit SQLite migration support.
+
+SQLite uses WAL, foreign keys, a 30-second lock wait and serialized transactions (`BEGIN IMMEDIATE`) to preserve answer/START/NEXT atomicity. Run **one backend worker on one machine**, with the file on a local disk. A test covers 60 simultaneous answer transactions; this is not a guarantee for arbitrary hardware or traffic. Back up the file while the application is stopped, or use SQLite's backup API.
+
+For the original local PostgreSQL setup, install PostgreSQL 16/17/18 and run `scripts/start-local.ps1 -PostgreSQL` (add `-SkipInstall` when appropriate). Docker Compose continues to use PostgreSQL. Existing PostgreSQL competitions/accounts are not automatically copied to SQLite; use `-PostgreSQL` to keep using them. An explicit `DATABASE_URL` overrides the default SQLite location.
 
 To show frontend and backend logs in two separate terminal windows, use `scripts/start-local.ps1 -VisibleTerminals`. Add `-SkipInstall` when dependencies are already installed and unchanged.
 
@@ -66,7 +72,7 @@ To show frontend and backend logs in two separate terminal windows, use `scripts
 .\scripts\stop-local.ps1
 ```
 
-Stop preserves database files. Start the app again with `start-local.ps1`. Do not change the database password in `.env` after initializing this cluster without also changing the database role password.
+Stop preserves database files. Start the app again with `start-local.ps1`. In PostgreSQL mode, do not change the database password in `.env` without also changing the database role password.
 
 ### Test through VS Code port forwarding
 
@@ -101,7 +107,7 @@ In `frontend/`, run `npm ci` and `npm run dev`. Vite proxies `/api` and `/ws` to
 | `APP_ORIGINS` | Comma-separated exact allowed browser origins, including scheme and port. No wildcard. |
 | `COOKIE_SECURE` | `false` for local HTTP; **`true` when deployed over HTTPS**. |
 | `WEB_PORT` | Compose web port, default `8080`. Update `APP_ORIGINS` when changing this. |
-| `DATABASE_URL` | Optional backend PostgreSQL URL, overrides separate `DB_*` variables. |
+| `DATABASE_URL` | Optional SQLite or PostgreSQL URL; overrides separate `DB_*` variables. Without a URL or DB_HOST, SQLite is used. |
 | `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME` | Backend database connection; Compose sets these automatically. |
 | `SESSION_DAYS` | USER account and participant cookie lifetime, default 30 days. Admin sessions last 12 hours. |
 
@@ -131,7 +137,7 @@ Refresh and network reconnection preserve an existing participant's session and 
 - `/register`: name, email and password (minimum 12 characters), with confirmation in the UI. Successful registration signs in with role USER.
 - `/login`: email and password for both roles. ADMIN opens the dashboard; USER returns to public contests.
 - Navbar: account name, role-appropriate navigation and logout. The React admin route rejects USER accounts before mounting administrative content; the API independently checks the current database role on every request.
-- Account cookies are HttpOnly, SameSite=Lax, Secure when configured for HTTPS, and backed by hashed opaque tokens in PostgreSQL. Authenticated writes require the matching CSRF token. No credentials are stored in localStorage.
+- Account cookies are HttpOnly, SameSite=Lax, Secure when configured for HTTPS, and backed by hashed opaque tokens in the database. Authenticated writes require the matching CSRF token. No credentials are stored in localStorage.
 - Public registration rejects extra fields, including `role` and `username`. There is no public role-change endpoint. Only trusted server operators can create the first admin through environment configuration or promote an existing registered account through the CLI.
 
 From `backend/`, with the same database environment variables as the API:
@@ -172,7 +178,7 @@ stateDiagram-v2
 
 `Account` (ADMIN or USER) and `Participant` each have database-backed `AuthSession` records. A participant can optionally reference an account, with at most one participation per account/edition. Passwords use Argon2id. Session tokens are randomly generated and stored as SHA-256 hashes, with account and edition-specific participant cookies. `Admin` remains a Python model alias only for older server-side integrations; the database table is `accounts`.
 
-- PostgreSQL foreign keys and cascading deletions protect referential integrity.
+- Database foreign keys and cascading deletions protect referential integrity.
 - Unique constraints protect normalized participant names, question positions, and one answer per participant/question.
 - UTC timestamps track creation, joining, answers, start, finish, and session expiration.
 - All critical operations acquire the same edition row lock using `SELECT … FOR UPDATE`. Joining and START, answering and NEXT/pause/stop, participant exclusion and answering, and question editing and START serialize against that lock.
@@ -230,7 +236,7 @@ Review generated migrations before applying them. Back up the database before pr
 
 ## Testing
 
-Backend tests require a **separate PostgreSQL database named `quiz_test`**. They refuse to run without an explicit `TEST_DATABASE_URL` ending in that database name. **All test data in that database is erased between tests.** They never use an in-memory database.
+Backend tests require a **separate PostgreSQL database named `quiz_test`** or a SQLite file whose name ends in `quiz_test.sqlite3`. They refuse to run without an explicit `TEST_DATABASE_URL` matching one of these test database names. **All test data in that database is erased between tests.** They never use an in-memory database. For SQLite, set `TEST_DATABASE_URL=sqlite:///C:/path/to/quiz_test.sqlite3`; the tests create its schema automatically.
 
 ```powershell
 # Create quiz_test with your PostgreSQL tools first.
@@ -265,7 +271,7 @@ The additional account/control browser test registers a USER through the UI, che
 
 ## Runtime limits
 
-This version intentionally uses **one FastAPI worker and one backend replica**. The WebSocket room registry and rate limiter are process-local; all durable competition/session/answer data lives in PostgreSQL. Do not add workers or replicas without adding shared event delivery (for example PostgreSQL LISTEN/NOTIFY or Redis) and a shared rate limiter. No Redis service is required for this deployment.
+This version intentionally uses **one FastAPI worker and one backend replica**. The WebSocket room registry and rate limiter are process-local; all durable competition/session/answer data lives in the configured SQLite or PostgreSQL database. Do not add workers or replicas without adding shared event delivery (for example PostgreSQL LISTEN/NOTIFY or Redis) and a shared rate limiter. No Redis service is required for this deployment.
 
 If a backend restart happens between a database commit and its event broadcast, sockets reconnect and reload the committed state. An event is a notification, not the durable source of truth. Restarting a live edition never reopens registrations or resets the active question.
 
@@ -275,7 +281,7 @@ If a backend restart happens between a database commit and its event broadcast, 
 backend/
   app/          configuration, models, schemas, security, services, API, realtime
   alembic/      explicit versioned database migration
-  tests/        PostgreSQL integration, authorization and concurrency tests
+  tests/        SQLite/PostgreSQL integration, authorization and concurrency tests
 frontend/
   src/          React pages, reusable forms/components, API and reconnect hook
   e2e/          browser acceptance test

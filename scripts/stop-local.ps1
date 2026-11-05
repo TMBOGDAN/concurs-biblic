@@ -15,7 +15,7 @@ foreach ($kind in @('backend', 'frontend')) {
     }
 }
 $expectedData = [IO.Path]::GetFullPath((Join-Path $projectRoot '.local\dev-postgres'))
-if ([IO.Path]::GetFullPath($state.pgData) -eq $expectedData) {
+if ($state.pgData -and [IO.Path]::GetFullPath($state.pgData) -eq $expectedData) {
     & (Join-Path $state.pgBin 'pg_ctl.exe') -D $state.pgData -m fast -w stop
 }
 Remove-Item -LiteralPath $pidFile

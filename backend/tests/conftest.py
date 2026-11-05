@@ -3,7 +3,8 @@ from pathlib import Path
 import pytest
 
 test_url = os.environ.get("TEST_DATABASE_URL", "")
-if not test_url or not test_url.rstrip("/").endswith("quiz_test"):
+sqlite_test = test_url.startswith("sqlite:///") and test_url.endswith("quiz_test.sqlite3")
+if not sqlite_test and (not test_url or not test_url.rstrip("/").endswith("quiz_test")):
     raise RuntimeError("Set TEST_DATABASE_URL to a dedicated PostgreSQL database named quiz_test. Tests erase its data.")
 os.environ["DATABASE_URL"] = test_url
 os.environ["COOKIE_SECURE"] = "false"
@@ -26,7 +27,8 @@ def migrate():
     backend = Path(__file__).resolve().parents[1]
     config = Config(str(backend / "alembic.ini"))
     config.set_main_option("script_location", str(backend / "alembic"))
-    command.upgrade(config, "head")
+    from app.initialize import initialize_database
+    initialize_database()
     yield
     engine.dispose()
 
@@ -34,7 +36,12 @@ def migrate():
 @pytest.fixture(autouse=True)
 def clean_database(migrate):
     with engine.begin() as db:
-        db.execute(text("TRUNCATE accounts, competitions RESTART IDENTITY CASCADE"))
+        if engine.dialect.name == "sqlite":
+            from app.db import Base
+            for table in reversed(Base.metadata.sorted_tables):
+                db.execute(table.delete())
+        else:
+            db.execute(text("TRUNCATE accounts, competitions RESTART IDENTITY CASCADE"))
     limiter.attempts.clear()
     with SessionLocal.begin() as db:
         db.add(Account(username="test-admin", name="Test Admin", email="test-admin@example.com", role=Role.ADMIN, password_hash=hasher.hash(TEST_PASSWORD)))

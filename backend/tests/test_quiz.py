@@ -217,6 +217,7 @@ def test_results_refresh_participant_loaded_before_finish(admin, client):
     with SessionLocal() as db:
         participant = db.get(Participant, joined["participant_id"])
         assert participant.final_score is None
+        db.commit()  # Release the snapshot before another transaction finishes the edition.
         assert admin.post(url + "/finish").status_code == 200
         result = results_data(db, eid, participant)
         assert result["your_score"] == result["leaderboard"][0]["score"] == 1

@@ -156,6 +156,7 @@ def test_participant_management_and_exclusion_preserves_answers(admin, client):
     with SessionLocal() as db:
         stale = db.get(Participant, pid)
         assert stale.is_active
+        db.commit()  # Allow the exclusion transaction to complete before checking stale state.
         assert admin.delete(url + f"/participants/{pid}").status_code == 204
         with pytest.raises(Exception) as error:
             submit_answer(db, eid, stale, AnswerInput(question_id=qs[0]["id"], option_ids=[qs[0]["options"][0]["id"]]))

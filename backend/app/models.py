@@ -1,8 +1,23 @@
 from datetime import datetime, timezone
 from enum import Enum
 from sqlalchemy import Boolean, CheckConstraint, DateTime, Enum as SAEnum, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy.types import TypeDecorator
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .db import Base
+
+
+class UTCDateTime(TypeDecorator):
+    """SQLite drops timezone metadata; return aware UTC on both database engines."""
+    impl = DateTime(timezone=True)
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        return value.astimezone(timezone.utc) if value is not None else None
+
+    def process_result_value(self, value, dialect):
+        if value is None:
+            return None
+        return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
 
 
 def utcnow():
@@ -36,7 +51,7 @@ class Account(Base):
     name: Mapped[str] = mapped_column(String(80))
     role: Mapped[Role] = mapped_column(SAEnum(Role, name="account_role"), default=Role.USER, server_default="USER")
     password_hash: Mapped[str] = mapped_column(String(255))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
 
 # Compatibility for existing server-side integrations; authorization uses Role.
@@ -48,7 +63,7 @@ class Competition(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     title: Mapped[str] = mapped_column(String(200))
     description: Mapped[str] = mapped_column(Text, default="")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
     editions: Mapped[list["Edition"]] = relationship(cascade="all, delete-orphan", passive_deletes=True)
 
 
@@ -63,10 +78,10 @@ class Edition(Base):
     status: Mapped[Status] = mapped_column(SAEnum(Status, name="edition_status"), default=Status.DRAFT)
     current_index: Mapped[int] = mapped_column(default=-1)
     revision: Mapped[int] = mapped_column(default=0)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    scheduled_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     results_published: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     questions: Mapped[list["Question"]] = relationship(cascade="all, delete-orphan", passive_deletes=True, order_by="Question.position")
     participants: Mapped[list["Participant"]] = relationship(cascade="all, delete-orphan", passive_deletes=True)
@@ -74,7 +89,7 @@ class Edition(Base):
 
 class Question(Base):
     __tablename__ = "questions"
-    __table_args__ = (UniqueConstraint("edition_id", "position", deferrable=True, initially="DEFERRED"), CheckConstraint("position >= 0"))
+    __table_args__ = (UniqueConstraint("edition_id", "position", deferrable=True, initially="DEFERRED").ddl_if(dialect="postgresql"), UniqueConstraint("edition_id", "position").ddl_if(dialect="sqlite"), CheckConstraint("position >= 0"))
     id: Mapped[int] = mapped_column(primary_key=True)
     edition_id: Mapped[int] = mapped_column(ForeignKey("editions.id", ondelete="CASCADE"), index=True)
     text: Mapped[str] = mapped_column(Text)
@@ -99,7 +114,7 @@ class Participant(Base):
     edition_id: Mapped[int] = mapped_column(ForeignKey("editions.id", ondelete="CASCADE"), index=True)
     name: Mapped[str] = mapped_column(String(80))
     normalized_name: Mapped[str] = mapped_column(String(160))
-    joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    joined_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
     final_score: Mapped[int | None] = mapped_column(Integer)
     account_id: Mapped[int | None] = mapped_column(ForeignKey("accounts.id", ondelete="SET NULL"), index=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
@@ -112,7 +127,7 @@ class ParticipantAnswer(Base):
     participant_id: Mapped[int] = mapped_column(ForeignKey("participants.id", ondelete="CASCADE"), index=True)
     question_id: Mapped[int] = mapped_column(ForeignKey("questions.id", ondelete="CASCADE"), index=True)
     points: Mapped[int] = mapped_column(Integer)
-    submitted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    submitted_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
     selections: Mapped[list["AnswerSelection"]] = relationship(cascade="all, delete-orphan", passive_deletes=True)
 
 
@@ -132,4 +147,4 @@ class AuthSession(Base):
     csrf: Mapped[str] = mapped_column(String(64))
     account_id: Mapped[int | None] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"), index=True)
     participant_id: Mapped[int | None] = mapped_column(ForeignKey("participants.id", ondelete="CASCADE"), index=True)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime())

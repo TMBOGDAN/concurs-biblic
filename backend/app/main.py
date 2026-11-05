@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 import asyncio
 from anyio import from_thread
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
@@ -20,7 +21,16 @@ from .services import (competition_data, edition_data, get_or_404, lock_edition,
                        question_data, questions_for, require_editable, results_data, save_question,
                        live_leaderboard, state_data, submit_answer, transition)
 
-app = FastAPI(title="Quiz Arena API", version="1.0.0", docs_url="/api/docs", openapi_url="/api/openapi.json",
+@asynccontextmanager
+async def lifespan(app):
+    from .initialize import initialize_database
+    from .bootstrap import bootstrap
+    await run_in_threadpool(initialize_database)
+    await run_in_threadpool(bootstrap)
+    yield
+
+
+app = FastAPI(lifespan=lifespan, title="Quiz Arena API", version="1.0.0", docs_url="/api/docs", openapi_url="/api/openapi.json",
               swagger_ui_oauth2_redirect_url="/api/docs/oauth2-redirect")
 API = "/api/v1"
 app.include_router(auth_router)
@@ -210,7 +220,13 @@ def delete_question(question_id: int, db: Session = Depends(get_db)):
     require_editable(e)
     db.delete(q)
     db.flush()
-    for index, question in enumerate(questions_for(db, e.id)):
+    remaining = questions_for(db, e.id)
+    if db.bind.dialect.name == "sqlite" and remaining:
+        offset = max(q.position for q in remaining) + len(remaining) + 1
+        for question in remaining:
+            question.position += offset
+        db.flush()
+    for index, question in enumerate(remaining):
         question.position = index
     e.revision += 1
     db.commit()
@@ -223,6 +239,11 @@ def reorder(edition_id: int, payload: ReorderInput, db: Session = Depends(get_db
     qs = {q.id: q for q in questions_for(db, edition_id)}
     if set(payload.question_ids) != set(qs) or len(payload.question_ids) != len(qs):
         raise HTTPException(422, "Ordinea trebuie să conțină fiecare întrebare exact o dată.")
+    if db.bind.dialect.name == "sqlite" and qs:
+        offset = max(q.position for q in qs.values()) + len(qs) + 1
+        for q in qs.values():
+            q.position += offset
+        db.flush()
     for index, identity in enumerate(payload.question_ids):
         qs[identity].position = index
     e.revision += 1

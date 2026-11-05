@@ -10,3 +10,7 @@ frontend/dist/
 frontend/test-results/
 frontend/playwright-report/
 backend/*.egg-info/
+
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm

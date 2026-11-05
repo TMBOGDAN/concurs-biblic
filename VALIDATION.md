@@ -50,3 +50,13 @@ This restarts only the development stack recorded by the scripts in `.local/dev-
 - [Vite setup requirements](https://vite.dev/guide/)
 - [Vitest migration requirements](https://main.vitest.dev/guide/migration/)
 - [PostgreSQL official image and version 18 volume layout](https://hub.docker.com/_/postgres)
+
+
+## SQLite startup (2026-11-05)
+
+- SQLite is now the default for Windows local startup; PostgreSQL remains available with `-PostgreSQL` and in Docker Compose.
+- `pytest -q -x` with a dedicated file-backed `quiz_test.sqlite3`: **33 passed** (17.46 seconds). One existing Starlette/httpx deprecation warning.
+- Includes 60 concurrent answer transactions, duplicate answer rejection, concurrent NEXT and join/START, account permissions, WebSocket events, question reordering, persistence after reinitialization, WAL and foreign key checks.
+- Started the local app using the existing tunnel origin; the public `/api/v1/health` returned `{"status":"ok"}`.
+- PostgreSQL regression tests were not rerun for this change.
+- Existing PostgreSQL data is retained separately and is not imported into SQLite.

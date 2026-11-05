@@ -1,4 +1,4 @@
-param([int]$DatabasePort = 55433, [switch]$VisibleTerminals, [switch]$SkipInstall, [string]$TunnelUrl)
+param([int]$DatabasePort = 55433, [switch]$PostgreSQL, [switch]$VisibleTerminals, [switch]$SkipInstall, [string]$TunnelUrl)
 $ErrorActionPreference = 'Stop'
 $tunnelOrigin = $null
 if ($TunnelUrl) {
@@ -27,38 +27,47 @@ if ($tunnelOrigin) {
     Remove-Item Env:__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS -ErrorAction SilentlyContinue
 }
 $env:COOKIE_SECURE = 'false' # Local Vite is HTTP; deployment retains .env's setting.
-$pgCandidates = @('C:\Program Files\PostgreSQL\18\bin', 'C:\Program Files\PostgreSQL\17\bin', 'C:\Program Files\PostgreSQL\16\bin')
-$pgBin = $pgCandidates | Where-Object { Test-Path -LiteralPath (Join-Path $_ 'pg_ctl.exe') } | Select-Object -First 1
-if (-not $pgBin) { throw 'Install PostgreSQL 16+ or use Docker Compose.' }
+$pgBin = $null
+$pgData = $null
+if ($PostgreSQL) {
+    $pgCandidates = @('C:\Program Files\PostgreSQL\18\bin', 'C:\Program Files\PostgreSQL\17\bin', 'C:\Program Files\PostgreSQL\16\bin')
+    $pgBin = $pgCandidates | Where-Object { Test-Path -LiteralPath (Join-Path $_ 'pg_ctl.exe') } | Select-Object -First 1
+    if (-not $pgBin) { throw 'Install PostgreSQL 16+ or use Docker Compose.' }
+    $localDir = Join-Path $projectRoot '.local'
+    $pgData = Join-Path $localDir 'dev-postgres'
+    New-Item -ItemType Directory -Force -Path $localDir | Out-Null
+    if (-not (Test-Path -LiteralPath (Join-Path $pgData 'PG_VERSION'))) {
+        $passwordFile = Join-Path $localDir 'init-password.tmp'
+        try {
+            [IO.File]::WriteAllText($passwordFile, $env:POSTGRES_PASSWORD, [Text.UTF8Encoding]::new($false))
+            & (Join-Path $pgBin 'initdb.exe') -D $pgData -U $env:POSTGRES_USER -A scram-sha-256 --pwfile=$passwordFile --encoding=UTF8 --locale=C
+            if ($LASTEXITCODE -ne 0) { throw 'PostgreSQL initialization failed.' }
+        } finally { if (Test-Path -LiteralPath $passwordFile) { Remove-Item -LiteralPath $passwordFile } }
+    }
+    & (Join-Path $pgBin 'pg_ctl.exe') -D $pgData status *> $null
+    if ($LASTEXITCODE -ne 0) {
+        & (Join-Path $pgBin 'pg_ctl.exe') -D $pgData -l (Join-Path $localDir 'dev-postgres.log') -o "-p $DatabasePort -h 127.0.0.1" -w start
+        if ($LASTEXITCODE -ne 0) { throw 'Could not start local PostgreSQL.' }
+    }
+    $env:PGPASSWORD = $env:POSTGRES_PASSWORD
+    $databaseExists = & (Join-Path $pgBin 'psql.exe') -h 127.0.0.1 -p $DatabasePort -U $env:POSTGRES_USER -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname = 'quiz'"
+    if ($databaseExists -ne '1') {
+        & (Join-Path $pgBin 'createdb.exe') -h 127.0.0.1 -p $DatabasePort -U $env:POSTGRES_USER quiz
+        if ($LASTEXITCODE -ne 0) { throw 'Could not create database.' }
+    }
+    Remove-Item Env:PGPASSWORD
+    $env:DB_HOST = '127.0.0.1'
+    $env:DB_PORT = "$DatabasePort"
+    $env:DB_USER = $env:POSTGRES_USER
+    $env:DB_NAME = 'quiz'
+    $env:DB_PASSWORD = $env:POSTGRES_PASSWORD
+    Remove-Item Env:DATABASE_URL -ErrorAction SilentlyContinue
+} else {
+    if (-not $env:DATABASE_URL) { $env:DATABASE_URL = 'sqlite:///' + ((Join-Path $projectRoot '.local/quiz.sqlite3') -replace '\\', '/') }
+    Write-Host 'Using SQLite; the database and tables are created automatically when missing.'
+}
 $localDir = Join-Path $projectRoot '.local'
-$pgData = Join-Path $localDir 'dev-postgres'
 New-Item -ItemType Directory -Force -Path $localDir | Out-Null
-if (-not (Test-Path -LiteralPath (Join-Path $pgData 'PG_VERSION'))) {
-    $passwordFile = Join-Path $localDir 'init-password.tmp'
-    try {
-        [IO.File]::WriteAllText($passwordFile, $env:POSTGRES_PASSWORD, [Text.UTF8Encoding]::new($false))
-        & (Join-Path $pgBin 'initdb.exe') -D $pgData -U $env:POSTGRES_USER -A scram-sha-256 --pwfile=$passwordFile --encoding=UTF8 --locale=C
-        if ($LASTEXITCODE -ne 0) { throw 'PostgreSQL initialization failed.' }
-    } finally { if (Test-Path -LiteralPath $passwordFile) { Remove-Item -LiteralPath $passwordFile } }
-}
-& (Join-Path $pgBin 'pg_ctl.exe') -D $pgData status *> $null
-if ($LASTEXITCODE -ne 0) {
-    & (Join-Path $pgBin 'pg_ctl.exe') -D $pgData -l (Join-Path $localDir 'dev-postgres.log') -o "-p $DatabasePort -h 127.0.0.1" -w start
-    if ($LASTEXITCODE -ne 0) { throw 'Could not start local PostgreSQL.' }
-}
-$env:PGPASSWORD = $env:POSTGRES_PASSWORD
-$databaseExists = & (Join-Path $pgBin 'psql.exe') -h 127.0.0.1 -p $DatabasePort -U $env:POSTGRES_USER -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname = 'quiz'"
-if ($databaseExists -ne '1') {
-    & (Join-Path $pgBin 'createdb.exe') -h 127.0.0.1 -p $DatabasePort -U $env:POSTGRES_USER quiz
-    if ($LASTEXITCODE -ne 0) { throw 'Could not create database.' }
-}
-Remove-Item Env:PGPASSWORD
-$env:DB_HOST = '127.0.0.1'
-$env:DB_PORT = "$DatabasePort"
-$env:DB_USER = $env:POSTGRES_USER
-$env:DB_NAME = 'quiz'
-$env:DB_PASSWORD = $env:POSTGRES_PASSWORD
-Remove-Item Env:DATABASE_URL -ErrorAction SilentlyContinue
 $python = Join-Path $projectRoot '.venv\Scripts\python.exe'
 if (-not (Test-Path -LiteralPath $python)) { python -m venv .venv }
 if (-not $SkipInstall) {
@@ -67,10 +76,8 @@ if (-not $SkipInstall) {
 }
 Push-Location -LiteralPath (Join-Path $projectRoot 'backend')
 try {
-    & $python -m alembic upgrade head
-    if ($LASTEXITCODE -ne 0) { throw 'Migration failed.' }
-    & $python -m app.bootstrap
-    if ($LASTEXITCODE -ne 0) { throw 'Admin bootstrap failed.' }
+    & $python -m app.initialize
+    if ($LASTEXITCODE -ne 0) { throw 'Database initialization failed.' }
 } finally { Pop-Location }
 if (-not $SkipInstall) {
     Push-Location -LiteralPath (Join-Path $projectRoot 'frontend')
